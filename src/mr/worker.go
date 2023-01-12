@@ -5,7 +5,6 @@ import "log"
 import "net/rpc"
 import "hash/fnv"
 
-
 //
 // Map functions return a slice of KeyValue.
 //
@@ -24,7 +23,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,9 +30,38 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-
+	for {
+		res := RequestTask()
+		log.Printf("Worker: receive coordinator's response %v", res)
+		switch res.TaskType {
+		case MapTask:
+			// do map tasks
+		case ReduceTask:
+			// do reduce tasks
+		case Complete:
+			return
+		default:
+			panic((fmt.Sprintf("Unexpected Tasktype %v".res.TaskType)))
+		}
+	}
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+
+}
+
+func RequestTask() Task {
+	args := TaskArgs{}
+	reply := Task{}
+	ok := call("Coordinator.PollTask", &args, &reply)
+	if ok {
+		fmt.Println(reply)
+	} else {
+		fmt.Printf("Call Failed!\n")
+	}
+	return reply
+}
+
+func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 
 }
 
