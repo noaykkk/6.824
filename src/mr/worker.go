@@ -1,6 +1,12 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"strconv"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
@@ -35,13 +41,15 @@ func Worker(mapf func(string, string) []KeyValue,
 		log.Printf("Worker: receive coordinator's response %v", res)
 		switch res.TaskType {
 		case MapTask:
-			// do map tasks
+			DoMapTask(mapf, &res)
 		case ReduceTask:
-			// do reduce tasks
-		case Complete:
+			// do reduce task
+		case WaitingTask:
+			// do waiting for tasks
+		case ExitTask:
 			return
 		default:
-			panic((fmt.Sprintf("Unexpected Tasktype %v".res.TaskType)))
+			panic(fmt.Sprintf("Unexpected Tasktype %v", res.TaskType))
 		}
 	}
 	// uncomment to send the Example RPC to the coordinator.
@@ -62,7 +70,49 @@ func RequestTask() Task {
 }
 
 func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
+	var intermediate []KeyValue
+	filename := response.Filename
 
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("Failed Open %v", filename)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("Failed read %v", filename)
+	}
+	file.Close()
+	intermediate = mapf(filename, string(content))
+
+	rn := response.ReducerNum
+	HashedKV := make([][]KeyValue, rn)
+
+	for _, kv := range intermediate {
+		HashedKV[ihash(kv.Key)%rn] = append(HashedKV[ihash(kv.Key)%rn], kv)
+	}
+
+	for i := 0; i < rn; i++ {
+		TempFileName := "mr-tmp-" + strconv.Itoa(response.TaskId) + "-" + strconv.Itoa(i)
+		TempFile, _ := os.Create(TempFileName)
+		enc := json.NewEncoder(TempFile)
+		for _, kv := range HashedKV[i] {
+			enc.Encode(kv)
+		}
+		TempFile.Close()
+	}
+}
+
+func CompleteCall() Task {
+	args := Task{}
+	reply := Task{}
+	ok := call("Coordinator.MarkFinished", &args, &reply)
+
+	if ok {
+		fmt.Println(reply)
+	} else {
+		fmt.Printf("Complete Call Failed\n")
+	}
+	return reply
 }
 
 //
