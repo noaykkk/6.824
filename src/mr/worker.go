@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"strconv"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -18,6 +20,12 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type SortedKey []KeyValue
+
+func (k SortedKey) Len() int           { return len(k) }
+func (k SortedKey) Swap(i, j int)      { k[i], k[j] = k[j], k[i] }
+func (k SortedKey) Less(i, j int) bool { return k[i].Key < k[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -41,11 +49,16 @@ func Worker(mapf func(string, string) []KeyValue,
 		log.Printf("Worker: receive coordinator's response %v", res)
 		switch res.TaskType {
 		case MapTask:
-			DoMapTask(mapf, &res)
+			{
+				DoMapTask(mapf, &res)
+				CompleteCall()
+			}
 		case ReduceTask:
-			// do reduce task
+			{
+				DoReduceTask(reducef, &res)
+			}
 		case WaitingTask:
-			// do waiting for tasks
+			time.Sleep(time.Second)
 		case ExitTask:
 			return
 		default:
@@ -71,7 +84,7 @@ func RequestTask() Task {
 
 func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 	var intermediate []KeyValue
-	filename := response.Filename
+	filename := response.Filename[0]
 
 	file, err := os.Open(filename)
 	if err != nil {
@@ -100,6 +113,51 @@ func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 		}
 		TempFile.Close()
 	}
+}
+
+func DoReduceTask(reducef func(string, []string) string, response *Task) {
+	reduceFileNum := response.TaskId
+	intermediate := shuffle(response.Filename)
+	dir, _ := os.Getwd()
+	tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
+	if err != nil {
+		log.Fatal("Failed to create temp file", err)
+	}
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		var values []string
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	tempFile.Close()
+	fn := fmt.Sprintf("mr-out-%d", reduceFileNum)
+	os.Rename(tempFile.Name(), fn)
+}
+
+func shuffle(files []string) []KeyValue {
+	var kva []KeyValue
+	for _, filepath := range files {
+		file, _ := os.Open(filepath)
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+	sort.Sort(SortedKey(kva))
+	return kva
 }
 
 func CompleteCall() Task {

@@ -27,7 +27,7 @@ type Task struct {
 	TaskType   TaskType
 	TaskId     int
 	ReducerNum int
-	Filename   string
+	Filename   []string
 }
 
 type TaskType int

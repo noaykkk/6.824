@@ -2,8 +2,12 @@ package mr
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
+	"strconv"
+	"strings"
 	"sync"
+	"time"
 )
 import "net"
 import "os"
@@ -28,8 +32,9 @@ type TaskMetaHolder struct {
 }
 
 type TaskMetaInfo struct {
-	state   State
-	TaskAdr *Task
+	state     State
+	TaskAdr   *Task
+	StartTime time.Time
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -41,7 +46,7 @@ func (c *Coordinator) makeMapTasks(files []string) {
 			TaskType:   MapTask,
 			TaskId:     id,
 			ReducerNum: c.ReducerNum,
-			Filename:   v,
+			Filename:   []string{v},
 		}
 
 		taskMetaInfo := TaskMetaInfo{
@@ -93,16 +98,38 @@ func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
 				}
 			}
 		}
-	default:
+	case ReducePhase:
+		{
+			if len(c.TaskChannelReduce) > 0 {
+				*reply = *<-c.TaskChannelReduce
+				if !c.taskMetaHolder.judgeState(reply.TaskId) {
+					fmt.Printf("Reduce task [ %d ] is running", reply.TaskId)
+				}
+			} else {
+				reply.TaskType = WaitingTask
+				if c.taskMetaHolder.checkTaskDone() {
+					c.toNextPhase()
+				}
+				return nil
+			}
+		}
+	case AllDone:
 		{
 			reply.TaskType = ExitTask
+		}
+	default:
+		{
+			panic("Undefined Phase")
 		}
 	}
 	return nil
 }
 
 func (c *Coordinator) toNextPhase() {
-	if c.DistPhase == MapPhase || c.DistPhase == ReducePhase {
+	if c.DistPhase == MapPhase {
+		c.makeReduceTasks()
+		c.DistPhase = ReducePhase
+	} else if c.DistPhase == ReducePhase {
 		c.DistPhase = AllDone
 	}
 }
@@ -147,6 +174,7 @@ func (t *TaskMetaHolder) judgeState(taskId int) bool {
 		return false
 	}
 	taskInfo.state = Working
+	taskInfo.StartTime = time.Now()
 	return true
 }
 
@@ -167,6 +195,65 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 		panic("Undefined task")
 	}
 	return nil
+}
+
+func (c *Coordinator) makeReduceTasks() {
+	for i := 0; i < c.ReducerNum; i++ {
+		id := c.generateTaskId()
+		task := Task{
+			TaskId:   id,
+			TaskType: ReduceTask,
+			Filename: selectReduceName(i),
+		}
+
+		taskMetaInfo := TaskMetaInfo{
+			state:   Waiting,
+			TaskAdr: &task,
+		}
+
+		c.taskMetaHolder.acceptMeta(&taskMetaInfo)
+		c.TaskChannelReduce <- &task
+	}
+}
+
+func selectReduceName(reduceNum int) []string {
+	var s []string
+	path, _ := os.Getwd()
+	files, _ := ioutil.ReadDir(path)
+	for _, file := range files {
+		if strings.HasPrefix(file.Name(), "mr-tmp") && strings.HasSuffix(file.Name(), strconv.Itoa(reduceNum)) {
+			s = append(s, file.Name())
+		}
+	}
+	return s
+}
+
+func (c *Coordinator) CrashDetector() {
+	for {
+		time.Sleep(time.Second * 2)
+		mu.Lock()
+		if c.DistPhase == AllDone {
+			mu.Unlock()
+			break
+		}
+		for _, v := range c.taskMetaHolder.MetaMap {
+			if v.state == Working {
+				// print
+			}
+			if v.state == Working && time.Since(v.StartTime) > 9*time.Second {
+				fmt.Printf("the task [ %d ] is crash, take [ %d ] seconds\n", v.TaskAdr.TaskId)
+				switch v.TaskAdr.TaskType {
+				case MapTask:
+					c.TaskChannelMap <- v.TaskAdr
+					v.state = Waiting
+				case ReduceTask:
+					c.TaskChannelReduce <- v.TaskAdr
+					v.state = Waiting
+				}
+			}
+		}
+		mu.Unlock()
+	}
 }
 
 //
@@ -216,7 +303,7 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 //
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
+func MakeCoordinator(files []string, numReduce int) *Coordinator {
 	c := Coordinator{
 		files:             files,
 		ReducerNum:        numReduce,
@@ -230,5 +317,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.makeMapTasks(files)
 
 	c.server()
+
+	go c.CrashDetector()
+
 	return &c
 }
